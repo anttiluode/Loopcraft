@@ -384,14 +384,15 @@ class LoopCraftApp:
         in_entry = self._entry(c1, self.in_var, width=10)
         in_entry.pack(side="left")
         in_entry.bind("<Return>", lambda _: self.apply_times())
-        in_entry.bind("<FocusOut>", lambda _: self.apply_times(silent=True))
+        # Keep both typed values while moving between fields; apply them together.
         c2 = tk.Frame(cut, bg=PANEL)
         c2.pack(side="left")
         self._label(c2, "OUT", 9, PURPLE, True).pack(side="left", padx=(0, 5))
         out_entry = self._entry(c2, self.out_var, width=10)
         out_entry.pack(side="left")
         out_entry.bind("<Return>", lambda _: self.apply_times())
-        out_entry.bind("<FocusOut>", lambda _: self.apply_times(silent=True))
+        # Out field is committed with Enter, Apply times, or Create GIF.
+        self._button(cut, "Apply times", lambda: self.apply_times()).pack(side="left", padx=(12, 0))
         self._label(cut, "", 9, MUTED, textvariable=self.selection_var).pack(side="right")
 
         # The settings scroll, but SAVE AS and CREATE GIF stay visible even when
