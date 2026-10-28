@@ -1,5 +1,7 @@
 # LoopCraft — YouTube → GIF Studio
 
+![pic](loopcraft_ui.png)
+
 A dark desktop GUI for making animated GIFs from **YouTube videos or local video files**. It includes a filmstrip timeline, draggable IN/OUT selection, silent playback preview, speed adjustment, pixel-size selection, crop/pad/stretch modes, frame-rate control, palette optimization, and live export progress.
 
 _The repository screenshot was captured before the timeline and panel layout fixes._
