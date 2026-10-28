@@ -53,7 +53,7 @@ BAD = "#FE8E9C"
 CANVAS_BG = "#0C1424"
 PREVIEW_SIZE = (688, 376)
 TIMELINE_WIDTH = 688
-TIMELINE_HEIGHT = 106
+TIMELINE_HEIGHT = 93
 THUMB_COUNT = 11
 FRAME_FPS = 12
 
@@ -167,8 +167,8 @@ class LoopCraftApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("LoopCraft  |  YouTube to GIF Studio")
-        root.geometry("1140x950")
-        root.minsize(1115, 930)
+        root.geometry("1250x840")
+        root.minsize(990, 670)
         root.configure(bg=BG)
 
         self.ffmpeg = get_ffmpeg()
@@ -194,6 +194,14 @@ class LoopCraftApp:
         self.out_point = 0.0
         self.head = 0.0
         self.dragging: str | None = None
+        self.view_start = 0.0
+        self.view_end = 1.0
+        self.detail_generation = 0
+        self.detail_after: str | None = None
+        self.overview_photos = [None] * THUMB_COUNT
+        self.overview_images = [None] * THUMB_COUNT
+        self.detail_images = [None] * THUMB_COUNT
+        self.last_preview_img: Image.Image | None = None
         self.still_after: str | None = None
         self.thumb_photos: list[ImageTk.PhotoImage | None] = [None] * THUMB_COUNT
         self.preview_photo: ImageTk.PhotoImage | None = None
@@ -216,13 +224,14 @@ class LoopCraftApp:
         self.loop_var = tk.BooleanVar(value=True)
         self.output_var = tk.StringVar(value=str(Path.home() / "Videos" / "loopcraft.gif"))
         self.selection_var = tk.StringVar(value="Select a video to begin")
+        self.view_var = tk.StringVar(value="Zoomed timeline")
 
         self._configure_style()
         self._build_ui()
         self._draw_timeline()
         self._draw_placeholder()
         self._render_settings_summary()
-        root.after(45, self._poll)
+        self.poll_after = root.after(45, self._poll)
         root.protocol("WM_DELETE_WINDOW", self._close)
         root.bind("<Control-o>", lambda _: self.load_local())
         root.bind("<Control-Return>", lambda _: self.export())
@@ -304,61 +313,105 @@ class LoopCraftApp:
         right.grid(row=0, column=1, sticky="ns")
         right.grid_propagate(False)
 
+        # Keep the controls and trim timeline visible while the video preview
+        # takes whatever vertical space is left. No fixed 376px preview.
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
         p_heading = tk.Frame(left, bg=PANEL)
-        p_heading.pack(fill="x", padx=15, pady=(14, 8))
+        p_heading.grid(row=0, column=0, sticky="ew", padx=15, pady=(11, 5))
         self._label(p_heading, "PREVIEW", 10, AQUA, True).pack(side="left")
-        self._label(p_heading, "drag IN / OUT handles below", 9, MUTED).pack(side="right")
-        self.preview_canvas = tk.Canvas(left, width=PREVIEW_SIZE[0], height=PREVIEW_SIZE[1],
+        self._label(p_heading, "Click preview to play / pause", 9, MUTED).pack(side="right")
+        self.preview_canvas = tk.Canvas(left, width=PREVIEW_SIZE[0], height=190,
                                         bg=CANVAS_BG, bd=0, highlightthickness=0)
-        self.preview_canvas.pack(padx=13, fill="x")
+        self.preview_canvas.grid(row=1, column=0, sticky="nsew", padx=13)
         self.preview_canvas.bind("<Button-1>", lambda _: self.toggle_play())
+        self.preview_canvas.bind("<Configure>", lambda _: self._redraw_preview())
 
         title_row = tk.Frame(left, bg=PANEL)
-        title_row.pack(fill="x", padx=17, pady=(10, 2))
-        self._label(title_row, "", 11, TEXT, True, textvariable=self.title_var,
+        title_row.grid(row=2, column=0, sticky="ew", padx=15, pady=(6, 0))
+        self._label(title_row, "", 10, TEXT, True, textvariable=self.title_var,
                     anchor="w").pack(side="left", fill="x", expand=True)
         self._label(title_row, "", 9, MUTED, textvariable=self.meta_var,
                     anchor="e").pack(side="right")
 
         controls = tk.Frame(left, bg=PANEL)
-        controls.pack(fill="x", padx=15, pady=(10, 11))
-        self.play_button = self._button(controls, "▶  Play selection", self.toggle_play, accent=True)
-        self.play_button.pack(side="left", padx=(0, 9))
-        self._button(controls, "|◀  IN", lambda: self.seek(self.in_point)).pack(side="left", padx=(0, 6))
-        self._button(controls, "OUT  ▶|", lambda: self.seek(max(self.in_point, self.out_point - 0.05))).pack(side="left")
-        self._label(controls, "", 10, MUTED, textvariable=self.position_var,
+        controls.grid(row=3, column=0, sticky="ew", padx=13, pady=(6, 5))
+        self.play_button = self._button(controls, "▶ Play selection", self.toggle_play, accent=True)
+        self.play_button.pack(side="left", padx=(0, 5))
+        self._button(controls, "[ Set IN", self.mark_in).pack(side="left", padx=(0, 5))
+        self._button(controls, "Set OUT ]", self.mark_out).pack(side="left")
+        self._label(controls, "", 9, MUTED, textvariable=self.position_var,
                     anchor="e").pack(side="right", fill="x", expand=True)
+
+        zoom = tk.Frame(left, bg=PANEL)
+        zoom.grid(row=4, column=0, sticky="ew", padx=13, pady=(0, 3))
+        self._label(zoom, "DETAIL TIMELINE", 9, AQUA, True).pack(side="left")
+        self._label(zoom, "", 8, MUTED, textvariable=self.view_var).pack(side="left", padx=(9, 0))
+        for title, action in (("−", lambda: self.zoom_timeline(2.0)),
+                              ("+", lambda: self.zoom_timeline(0.5)),
+                              ("Selection", self.zoom_to_selection),
+                              ("Full", self.zoom_full)):
+            tk.Button(zoom, text=title, command=action, bg=BORDER, fg=TEXT,
+                      activebackground=PURPLE_DARK, activeforeground=TEXT,
+                      relief="flat", bd=0, font=("Segoe UI", 9), padx=7, pady=3,
+                      cursor="hand2").pack(side="right", padx=(4, 0))
 
         self.timeline = tk.Canvas(left, height=TIMELINE_HEIGHT, width=TIMELINE_WIDTH,
                                   bg=PANEL_ALT, bd=0, highlightthickness=0,
                                   cursor="crosshair")
-        self.timeline.pack(padx=13, fill="x", pady=(0, 10))
+        self.timeline.grid(row=5, column=0, sticky="ew", padx=13)
         self.timeline.bind("<Button-1>", self._on_timeline_press)
         self.timeline.bind("<B1-Motion>", self._on_timeline_drag)
         self.timeline.bind("<ButtonRelease-1>", self._on_timeline_release)
-        self.timeline.bind("<Configure>", lambda _: self._draw_timeline())
+        self.timeline.bind("<Configure>", self._resize_timeline_images)
+
+        overview_row = tk.Frame(left, bg=PANEL)
+        overview_row.grid(row=6, column=0, sticky="ew", padx=13, pady=(3, 1))
+        self._label(overview_row, "FULL VIDEO", 8, MUTED, True).pack(side="left")
+        self._label(overview_row, "Click to move clip anywhere in the video", 8, MUTED).pack(side="right")
+        self.overview = tk.Canvas(left, height=37, bg=PANEL_ALT, bd=0,
+                                  highlightthickness=0, cursor="hand2")
+        self.overview.grid(row=7, column=0, sticky="ew", padx=13)
+        self.overview.bind("<Button-1>", self._on_overview_press)
+        self.overview.bind("<B1-Motion>", self._on_overview_press)
+        self.overview.bind("<Configure>", self._resize_timeline_images)
 
         cut = tk.Frame(left, bg=PANEL)
-        cut.pack(fill="x", padx=17, pady=(0, 12))
+        cut.grid(row=8, column=0, sticky="ew", padx=15, pady=(5, 8))
         c1 = tk.Frame(cut, bg=PANEL)
-        c1.pack(side="left", padx=(0, 15))
-        self._label(c1, "IN", 9, AQUA, True).pack(side="left", padx=(0, 8))
+        c1.pack(side="left", padx=(0, 12))
+        self._label(c1, "IN", 9, AQUA, True).pack(side="left", padx=(0, 5))
         in_entry = self._entry(c1, self.in_var, width=10)
         in_entry.pack(side="left")
         in_entry.bind("<Return>", lambda _: self.apply_times())
         in_entry.bind("<FocusOut>", lambda _: self.apply_times(silent=True))
         c2 = tk.Frame(cut, bg=PANEL)
         c2.pack(side="left")
-        self._label(c2, "OUT", 9, PURPLE, True).pack(side="left", padx=(0, 8))
+        self._label(c2, "OUT", 9, PURPLE, True).pack(side="left", padx=(0, 5))
         out_entry = self._entry(c2, self.out_var, width=10)
         out_entry.pack(side="left")
         out_entry.bind("<Return>", lambda _: self.apply_times())
         out_entry.bind("<FocusOut>", lambda _: self.apply_times(silent=True))
         self._label(cut, "", 9, MUTED, textvariable=self.selection_var).pack(side="right")
 
-        # Right-hand export control rack
-        inner = tk.Frame(right, bg=PANEL)
-        inner.pack(fill="both", expand=True, padx=16, pady=(12, 10))
+        # The settings scroll, but SAVE AS and CREATE GIF stay visible even when
+        # the window is shorter than the full content (common on laptop screens).
+        settings_host = tk.Frame(right, bg=PANEL)
+        settings_host.pack(fill="both", expand=True, padx=(13, 6), pady=(9, 0))
+        settings_canvas = tk.Canvas(settings_host, bg=PANEL, bd=0, highlightthickness=0)
+        settings_scroll = ttk.Scrollbar(settings_host, orient="vertical", command=settings_canvas.yview)
+        settings_canvas.configure(yscrollcommand=settings_scroll.set)
+        settings_scroll.pack(side="right", fill="y")
+        settings_canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(settings_canvas, bg=PANEL)
+        setting_window = settings_canvas.create_window(0, 0, window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _: settings_canvas.configure(scrollregion=settings_canvas.bbox("all")))
+        settings_canvas.bind("<Configure>", lambda event: settings_canvas.itemconfigure(
+            setting_window, width=event.width))
+        self.settings_canvas = settings_canvas
+        self.root.bind_all("<MouseWheel>", self._settings_mousewheel, add="+")
+        self.root.bind_all("<Button-4>", lambda e: self._settings_mousewheel(e, -1), add="+")
+        self.root.bind_all("<Button-5>", lambda e: self._settings_mousewheel(e, 1), add="+")
         self._label(inner, "EXPORT SETTINGS", 11, AQUA, True).pack(anchor="w", pady=(0, 10))
         self._label(inner, "RESOLUTION  ·  OUTPUT WIDTH", 9, MUTED, True).pack(anchor="w")
         preset = ttk.Combobox(inner, state="readonly", textvariable=self.res_var,
@@ -371,16 +424,15 @@ class LoopCraftApp:
         wc = tk.Frame(sizes, bg=PANEL)
         wc.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._label(wc, "WIDTH (px)", 8, MUTED).pack(anchor="w", pady=(0, 5))
-        self._entry(wc, self.width_var).pack(fill="x", ipady=5)
+        self._entry(wc, self.width_var).pack(fill="x", ipady=4)
         hc = tk.Frame(sizes, bg=PANEL)
         hc.pack(side="left", fill="x", expand=True)
         self._label(hc, "HEIGHT (blank = auto)", 8, MUTED).pack(anchor="w", pady=(0, 5))
-        self._entry(hc, self.height_var).pack(fill="x", ipady=5)
+        self._entry(hc, self.height_var).pack(fill="x", ipady=4)
         self._label(inner, "ASPECT HANDLING", 9, MUTED, True).pack(anchor="w", pady=(8, 3))
         ttk.Combobox(inner, state="readonly", textvariable=self.sizing_var,
                      values=("Fit (pad)", "Fill (crop)", "Stretch"),
                      style="Dark.TCombobox").pack(fill="x")
-
         sep = tk.Frame(inner, bg=BORDER, height=1)
         sep.pack(fill="x", pady=9)
         self._label(inner, "FRAME RATE", 9, MUTED, True).pack(anchor="w")
@@ -399,9 +451,8 @@ class LoopCraftApp:
                  variable=self.speed_var, command=lambda _: self._speed_changed(),
                  bg=PANEL, fg=MUTED, troughcolor=PANEL_ALT, activebackground=PURPLE,
                  highlightthickness=0, bd=0, showvalue=False, sliderlength=16,
-                 length=230).pack(side="left", fill="x", expand=True)
+                 length=195).pack(side="left", fill="x", expand=True)
         self._label(inner, "0.25× slow motion     •     4× fast", 8, MUTED).pack(anchor="w", pady=(0, 8))
-
         self._label(inner, "GIF COLOR PROFILE", 9, MUTED, True).pack(anchor="w")
         ttk.Combobox(inner, state="readonly", textvariable=self.dither_var,
                      values=("Balanced", "Smooth gradients", "Smaller file"),
@@ -411,18 +462,19 @@ class LoopCraftApp:
                        activeforeground=TEXT, selectcolor=PANEL_ALT,
                        font=("Segoe UI", 10)).pack(anchor="w", pady=(0, 5))
 
-        self._label(inner, "SAVE AS", 9, MUTED, True).pack(anchor="w")
-        path_row = tk.Frame(inner, bg=PANEL)
-        path_row.pack(fill="x", pady=(6, 9))
+        pinned = tk.Frame(right, bg=PANEL)
+        pinned.pack(side="bottom", fill="x", padx=14, pady=(8, 9))
+        tk.Frame(pinned, height=1, bg=BORDER).pack(fill="x", pady=(0, 9))
+        self._label(pinned, "SAVE AS", 9, MUTED, True).pack(anchor="w")
+        path_row = tk.Frame(pinned, bg=PANEL)
+        path_row.pack(fill="x", pady=(5, 8))
         self._entry(path_row, self.output_var).pack(side="left", fill="x", expand=True,
-                                                    ipady=5, padx=(0, 5))
+                                                    ipady=3, padx=(0, 5))
         self._button(path_row, "…", self.choose_save).pack(side="right")
-        self.export_button = self._button(inner, "✦   CREATE GIF", self.export, accent=True)
-        self.export_button.pack(fill="x", pady=(2, 7), ipady=5)
-        self._label(inner, "", 9, MUTED, textvariable=self.selection_var,
-                    wraplength=292).pack(anchor="center")
-        self.open_button = self._button(inner, "Open last GIF", self.open_last)
-        self.open_button.pack(fill="x", pady=(12, 0))
+        self.export_button = self._button(pinned, "✦   CREATE GIF", self.export, accent=True)
+        self.export_button.pack(fill="x", pady=(0, 3), ipady=3)
+        self.open_button = self._button(pinned, "Open last GIF", self.open_last)
+        self.open_button.pack(fill="x")
         self.open_button.configure(state="disabled")
 
         footer = tk.Frame(self.root, bg=BG)
@@ -448,24 +500,30 @@ class LoopCraftApp:
     def _draw_placeholder(self):
         c = self.preview_canvas
         c.delete("all")
-        w, h = PREVIEW_SIZE
-        c.create_oval(w / 2 - 52, h / 2 - 80, w / 2 + 52, h / 2 + 24,
-                      outline=BORDER, width=2)
-        c.create_text(w / 2, h / 2 - 28, text="▶", fill=AQUA,
+        w, h = max(c.winfo_width(), 240), max(c.winfo_height(), 100)
+        c.create_text(w / 2, h / 2 - 27, text="▶", fill=AQUA,
                       font=("Segoe UI Symbol", 29))
-        c.create_text(w / 2, h / 2 + 57, text="YOUR NEXT PERFECT LOOP STARTS HERE",
-                      fill=TEXT, font=("Segoe UI", 13, "bold"))
-        c.create_text(w / 2, h / 2 + 82, text="Import any local video or paste a YouTube link",
-                      fill=MUTED, font=("Segoe UI", 10))
+        c.create_text(w / 2, h / 2 + 18, text="YOUR NEXT PERFECT LOOP STARTS HERE",
+                      fill=TEXT, font=("Segoe UI", 12, "bold"))
+        c.create_text(w / 2, h / 2 + 43, text="Open a video or paste a YouTube link",
+                      fill=MUTED, font=("Segoe UI", 9))
 
-    def _set_preview(self, img: Image.Image):
-        img = img.convert("RGB")
-        if img.size != PREVIEW_SIZE:
-            img = img.resize(PREVIEW_SIZE, Image.Resampling.BILINEAR)
+    def _redraw_preview(self):
+        if self.last_preview_img is None:
+            self._draw_placeholder()
+            return
+        img = self.last_preview_img.copy()
+        w = max(1, self.preview_canvas.winfo_width())
+        h = max(1, self.preview_canvas.winfo_height())
+        img.thumbnail((w, h), Image.Resampling.BILINEAR)
         self.preview_photo = ImageTk.PhotoImage(img)
         self.preview_canvas.delete("all")
-        self.preview_canvas.create_image(PREVIEW_SIZE[0] / 2, PREVIEW_SIZE[1] / 2,
-                                         image=self.preview_photo, anchor="center")
+        self.preview_canvas.create_image(w / 2, h / 2, image=self.preview_photo,
+                                         anchor="center")
+
+    def _set_preview(self, img: Image.Image):
+        self.last_preview_img = img.convert("RGB")
+        self._redraw_preview()
 
     # ------ Loading -----------------------------------------------------------
     def load_url(self):
@@ -502,6 +560,10 @@ class LoopCraftApp:
         self.source_generation += 1
         self.source = None
         self.thumb_photos = [None] * THUMB_COUNT
+        self.overview_photos = [None] * THUMB_COUNT
+        self.detail_images = [None] * THUMB_COUNT
+        self.overview_images = [None] * THUMB_COUNT
+        self.detail_generation += 1
         self.duration = 0
         self.busy = "load"
         self.cancel.clear()
@@ -578,7 +640,7 @@ class LoopCraftApp:
         self.duration = duration
         self.source_width, self.source_height = width, height
         self.in_point = 0
-        self.out_point = min(6.0, duration)
+        self.out_point = min(8.0, duration)
         self.head = 0
         self._update_time_fields()
         self.title_var.set(title[:56] + ("…" if len(title) > 56 else ""))
@@ -590,7 +652,11 @@ class LoopCraftApp:
         self._finish_busy()
         self.status_var.set("Ready · Drag the trim handles, adjust settings, then Create GIF")
         self.thumb_photos = [None] * THUMB_COUNT
-        self._draw_timeline()
+        self.overview_photos = [None] * THUMB_COUNT
+        self.detail_images = [None] * THUMB_COUNT
+        self.overview_images = [None] * THUMB_COUNT
+        self._set_view(0, min(duration, max(24.0, self.out_point * 3)))
+        self._draw_overview()
         self.seek(0)
         threading.Thread(target=self._thumbnails_worker,
                          args=(path, self.source_generation), daemon=True).start()
@@ -615,9 +681,67 @@ class LoopCraftApp:
                 out = subprocess.run(command, capture_output=True, timeout=20,
                                      **popen_options())
                 if out.returncode == 0 and out.stdout:
-                    self.events.put(("thumb", generation, idx, out.stdout))
+                    self.events.put(("overview_thumb", generation, idx, out.stdout))
             except (subprocess.SubprocessError, OSError):
                 pass
+
+    def _schedule_detail_thumbnails(self):
+        if not self.source:
+            return
+        self.detail_generation += 1
+        token = self.detail_generation
+        self.detail_images = [None] * THUMB_COUNT
+        self.thumb_photos = [None] * THUMB_COUNT
+        if self.detail_after:
+            self.root.after_cancel(self.detail_after)
+        source, generation = self.source, self.source_generation
+        start, end = self.view_start, self.view_end
+        self.detail_after = self.root.after(170, lambda: threading.Thread(
+            target=self._detail_thumbnails_worker,
+            args=(source, generation, token, start, end), daemon=True).start())
+
+    def _detail_thumbnails_worker(self, source: Path, generation: int, token: int,
+                                   start: float, end: float):
+        for idx in range(THUMB_COUNT):
+            if (generation != self.source_generation or token != self.detail_generation
+                    or self.source != source or self.cancel.is_set()):
+                return
+            pos = start + (end - start) * (idx + 0.5) / THUMB_COUNT
+            try:
+                run = subprocess.run(self._thumbnail_command(source, pos, 115, 60),
+                                     capture_output=True, timeout=22, **popen_options())
+                if run.returncode == 0 and run.stdout:
+                    self.events.put(("detail_thumb", generation, token, idx, run.stdout))
+            except (subprocess.SubprocessError, OSError):
+                pass
+
+    def _resize_timeline_images(self, event=None):
+        if not hasattr(self, "timeline"):
+            return
+        width = max(20, (self.timeline.winfo_width() - 24) // THUMB_COUNT)
+        small = max(12, (self.overview.winfo_width() - 24) // THUMB_COUNT)
+        for i in range(THUMB_COUNT):
+            if self.detail_images[i] is not None:
+                self.thumb_photos[i] = ImageTk.PhotoImage(self.detail_images[i].resize(
+                    (width, 59), Image.Resampling.BILINEAR))
+            if self.overview_images[i] is not None:
+                self.overview_photos[i] = ImageTk.PhotoImage(self.overview_images[i].resize(
+                    (small, 28), Image.Resampling.BILINEAR))
+        self._draw_timeline()
+        self._draw_overview()
+
+    def _settings_mousewheel(self, event, direction=None):
+        if not hasattr(self, "settings_canvas"):
+            return
+        widget = self.root.winfo_containing(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        while widget is not None and widget is not self.settings_canvas:
+            widget = widget.master
+        if widget is not self.settings_canvas:
+            return
+        if direction is None:
+            direction = -1 if event.delta > 0 else 1
+        self.settings_canvas.yview_scroll(direction, "units")
+
 
     def _schedule_still(self, sec: float):
         self.still_generation += 1
@@ -649,6 +773,7 @@ class LoopCraftApp:
         self.head = max(0, min(self.duration, sec))
         self._update_time_fields()
         self._draw_timeline()
+        self._draw_overview()
         self._schedule_still(self.head)
 
     def _play_worker(self, token: int, stop: threading.Event, begin: float,
@@ -763,17 +888,120 @@ class LoopCraftApp:
             return
         self.seek(self.head + delta)
 
+    def mark_in(self):
+        """Set IN at the playhead, instead of merely seeking the old IN point."""
+        if not self.source:
+            return
+        self._stop_playback()
+        length = max(0.5, self.out_point - self.in_point)
+        self.in_point = min(max(0.0, self.head), self.duration - 0.1)
+        if self.out_point <= self.in_point + 0.1:
+            self.out_point = min(self.duration, self.in_point + length)
+        self.head = self.in_point
+        self._update_time_fields()
+        self._draw_timeline()
+        self._draw_overview()
+        self._schedule_still(self.head)
+
+    def mark_out(self):
+        if not self.source:
+            return
+        self._stop_playback()
+        length = max(0.5, self.out_point - self.in_point)
+        self.out_point = max(0.1, min(self.duration, self.head))
+        if self.in_point >= self.out_point - 0.1:
+            self.in_point = max(0.0, self.out_point - length)
+        self.head = self.out_point
+        self._update_time_fields()
+        self._draw_timeline()
+        self._draw_overview()
+        self._schedule_still(self.head)
+
     def _coords(self):
         width = max(100, int(self.timeline.winfo_width()))
-        return 10, width - 10
+        return 12, width - 12
 
     def _time_to_x(self, value: float) -> float:
         x0, x1 = self._coords()
-        return x0 + (x1 - x0) * value / max(0.001, self.duration)
+        return x0 + (x1 - x0) * (value - self.view_start) / max(0.001, self.view_end - self.view_start)
 
     def _x_to_time(self, x: float) -> float:
         x0, x1 = self._coords()
-        return max(0, min(self.duration, (x - x0) / max(1, x1 - x0) * self.duration))
+        frac = (x - x0) / max(1, x1 - x0)
+        return max(self.view_start, min(self.view_end, self.view_start + frac * (self.view_end - self.view_start)))
+
+    def _set_view(self, start: float, end: float):
+        if not self.duration:
+            return
+        span = min(self.duration, max(0.5, end - start))
+        start = max(0, min(self.duration - span, start))
+        end = start + span
+        if abs(start - self.view_start) < 0.01 and abs(end - self.view_end) < 0.01:
+            return
+        self.view_start, self.view_end = start, end
+        self.view_var.set(f"{readable_time(start)} – {readable_time(end)}")
+        self._schedule_detail_thumbnails()
+        self._draw_timeline()
+        self._draw_overview()
+
+    def zoom_full(self):
+        self._set_view(0, self.duration)
+
+    def zoom_to_selection(self):
+        if not self.source:
+            return
+        span = min(self.duration, max(2.0, (self.out_point - self.in_point) * 2.2))
+        mid = (self.in_point + self.out_point) / 2
+        self._set_view(mid - span / 2, mid + span / 2)
+
+    def zoom_timeline(self, factor: float):
+        if not self.source:
+            return
+        span = min(self.duration, max(0.5, (self.view_end - self.view_start) * factor))
+        middle = self.head if self.view_start <= self.head <= self.view_end else (self.view_start + self.view_end) / 2
+        self._set_view(middle - span / 2, middle + span / 2)
+
+    def _draw_overview(self):
+        if not hasattr(self, "overview"):
+            return
+        c = self.overview
+        c.delete("all")
+        x0, x1 = 12, max(100, c.winfo_width()) - 12
+        width = x1 - x0
+        for i in range(THUMB_COUNT):
+            a = x0 + width * i / THUMB_COUNT
+            b = x0 + width * (i+1) / THUMB_COUNT
+            c.create_rectangle(a, 3, b, 31, fill=CANVAS_BG, outline=BORDER)
+            if self.overview_photos[i]:
+                c.create_image(a, 3, image=self.overview_photos[i], anchor="nw")
+        if not self.source or not self.duration:
+            return
+        def at(sec):
+            return x0 + width * sec / self.duration
+        # Purple viewport = the section currently enlarged in the detail timeline.
+        a, b = at(self.view_start), at(self.view_end)
+        c.create_rectangle(a, 2, b, 32, outline=PURPLE, width=2)
+        ia, ib = at(self.in_point), at(self.out_point)
+        if ib - ia < 5:
+            ib = ia + 5  # tiny selection remains visible on very long videos
+        c.create_rectangle(ia, 7, ib, 27, outline=AQUA, fill=AQUA, stipple="gray50")
+        h = at(self.head)
+        c.create_line(h, 0, h, 36, fill=YELLOW, width=2)
+
+    def _on_overview_press(self, event):
+        if not self.source or not self.duration:
+            return
+        self._stop_playback()
+        width = max(1, self.overview.winfo_width() - 24)
+        sec = self.duration * min(1, max(0, (event.x - 12) / width))
+        length = max(0.1, self.out_point - self.in_point)
+        # Relocate the complete chosen segment instead of collapsing its handles.
+        self.in_point = max(0, min(self.duration - length, sec))
+        self.out_point = min(self.duration, self.in_point + length)
+        self.head = self.in_point
+        self._update_time_fields()
+        self.zoom_to_selection()
+        self.seek(self.head)
 
     def _draw_timeline(self):
         if not hasattr(self, "timeline"):
@@ -784,40 +1012,48 @@ class LoopCraftApp:
         width = x1 - x0
         for i in range(THUMB_COUNT):
             a = x0 + width * i / THUMB_COUNT
-            b = x0 + width * (i + 1) / THUMB_COUNT
-            c.create_rectangle(a, 8, b, 77, fill=CANVAS_BG, outline=BORDER)
+            b = x0 + width * (i+1) / THUMB_COUNT
+            c.create_rectangle(a, 6, b, 66, fill=CANVAS_BG, outline=BORDER)
             if self.thumb_photos[i]:
-                c.create_image(a, 8, image=self.thumb_photos[i], anchor="nw")
+                c.create_image(a, 6, image=self.thumb_photos[i], anchor="nw")
         if not self.source or self.duration <= 0:
-            c.create_text((x0 + x1) / 2, 40, text="Your timeline will appear here",
+            c.create_text((x0 + x1) / 2, 38, text="Your timeline will appear here",
                           fill=MUTED, font=("Segoe UI", 10))
             return
         a, b = self._time_to_x(self.in_point), self._time_to_x(self.out_point)
-        c.create_rectangle(x0, 8, a, 77, fill="#050A13", stipple="gray50", outline="")
-        c.create_rectangle(b, 8, x1, 77, fill="#050A13", stipple="gray50", outline="")
-        c.create_rectangle(a, 7, b, 78, outline=AQUA, width=2)
-        for x, col in ((a, AQUA), (b, PURPLE)):
-            c.create_rectangle(x - 5, 6, x + 5, 79, fill=col, outline="")
-            c.create_line(x - 1, 34, x - 1, 52, fill=PANEL, width=1)
-            c.create_line(x + 2, 34, x + 2, 52, fill=PANEL, width=1)
+        a, b = max(x0, a), min(x1, b)
+        if a <= b:
+            c.create_rectangle(x0, 6, a, 66, fill="#050A13", stipple="gray50", outline="")
+            c.create_rectangle(b, 6, x1, 66, fill="#050A13", stipple="gray50", outline="")
+            c.create_rectangle(a, 5, b, 67, outline=AQUA, width=2)
+        for position, color in ((self.in_point, AQUA), (self.out_point, PURPLE)):
+            x = self._time_to_x(position)
+            if x0 <= x <= x1:
+                c.create_rectangle(x - 5, 4, x + 5, 68, fill=color, outline="")
+                c.create_line(x - 1, 27, x - 1, 47, fill=PANEL, width=1)
+                c.create_line(x + 2, 27, x + 2, 47, fill=PANEL, width=1)
         h = self._time_to_x(self.head)
-        c.create_line(h, 4, h, 80, fill=YELLOW, width=2)
-        c.create_polygon(h - 5, 0, h + 5, 0, h, 7, fill=YELLOW, outline="")
+        if x0 <= h <= x1:
+            c.create_line(h, 0, h, 68, fill=YELLOW, width=2)
+            c.create_polygon(h - 5, 0, h + 5, 0, h, 7, fill=YELLOW, outline="")
         for i in range(5):
-            sec = self.duration * i / 4
+            sec = self.view_start + (self.view_end - self.view_start) * i / 4
             x = self._time_to_x(sec)
-            c.create_text(x, 94, text=readable_time(sec, False), fill=MUTED,
+            c.create_text(x, 81, text=readable_time(sec, False), fill=MUTED,
                           anchor="w" if i == 0 else "e" if i == 4 else "center",
                           font=("Segoe UI", 9))
 
     def _on_timeline_press(self, event):
         if not self.source:
             return
+        if self.playing:
+            self._stop_playback()
         x = event.x
-        if abs(x - self._time_to_x(self.in_point)) < 13:
-            self.dragging = "in"
-        elif abs(x - self._time_to_x(self.out_point)) < 13:
-            self.dragging = "out"
+        handles = [(abs(x - self._time_to_x(self.in_point)), "in"),
+                   (abs(x - self._time_to_x(self.out_point)), "out")]
+        distance, marker = min(handles)
+        if distance <= 14:
+            self.dragging = marker
         else:
             self.dragging = "head"
             self.seek(self._x_to_time(x))
@@ -827,15 +1063,16 @@ class LoopCraftApp:
             return
         sec = self._x_to_time(event.x)
         if self.dragging == "in":
-            self.in_point = min(max(0, sec), self.out_point - 0.1)
+            self.in_point = max(0, min(sec, self.out_point - 0.1))
             self.head = self.in_point
         elif self.dragging == "out":
-            self.out_point = max(min(self.duration, sec), self.in_point + 0.1)
-            self.head = min(self.out_point, self.head)
+            self.out_point = min(self.duration, max(sec, self.in_point + 0.1))
+            self.head = self.out_point
         else:
             self.head = sec
         self._update_time_fields()
         self._draw_timeline()
+        self._draw_overview()
 
     def _on_timeline_release(self, event):
         if not self.dragging:
@@ -859,7 +1096,9 @@ class LoopCraftApp:
             self.in_point = a
             self.out_point = min(self.duration, b)
             self.head = self.in_point
+            self.zoom_to_selection()
             self.seek(self.head)
+            self._draw_overview()
             return True
         except ValueError as exc:
             if not silent:
@@ -1081,16 +1320,20 @@ class LoopCraftApp:
                     self.progress["value"] = event[2]
                 elif kind == "status" and event[1] == self.source_generation:
                     self.status_var.set(event[2])
-                elif kind == "thumb" and event[1] == self.source_generation and self.source:
+                elif kind in ("overview_thumb", "detail_thumb") and event[1] == self.source_generation and self.source:
                     try:
-                        img = Image.open(io.BytesIO(event[3])).convert("RGB")
-                        x0, x1 = self._coords()
-                        width = int((x1 - x0) / THUMB_COUNT)
-                        img = img.resize((width, 69), Image.Resampling.BILINEAR)
-                        self.thumb_photos[event[2]] = ImageTk.PhotoImage(img)
-                        self._draw_timeline()
+                        if kind == "overview_thumb":
+                            idx, data = event[2], event[3]
+                            self.overview_images[idx] = Image.open(io.BytesIO(data)).convert("RGB")
+                        else:
+                            if event[2] != self.detail_generation:
+                                continue
+                            idx, data = event[3], event[4]
+                            self.detail_images[idx] = Image.open(io.BytesIO(data)).convert("RGB")
+                        self._resize_timeline_images()
                     except (OSError, ValueError):
                         pass
+
                 elif kind == "still" and event[1] == self.source_generation and event[2] == self.still_generation and not self.playing:
                     try:
                         self._set_preview(Image.open(io.BytesIO(event[3])))
@@ -1101,6 +1344,7 @@ class LoopCraftApp:
                     self.head = self.in_point
                     self._update_time_fields()
                     self._draw_timeline()
+                    self._draw_overview()
                 elif kind == "encode_progress" and self.busy == "export":
                     if event[1] == 2:
                         self.progress["value"] = max(0, min(100, event[2]))
@@ -1138,9 +1382,10 @@ class LoopCraftApp:
                 self.head = min(latest[2], self.duration)
                 self.position_var.set(f"{readable_time(self.head)} / {readable_time(self.duration)}")
                 self._draw_timeline()
+                self._draw_overview()
             except (ValueError, tk.TclError):
                 pass
-        self.root.after(45, self._poll)
+        self.poll_after = self.root.after(45, self._poll)
 
     def open_last(self):
         if not self.recent_output or not self.recent_output.exists():
@@ -1154,6 +1399,12 @@ class LoopCraftApp:
             subprocess.Popen(["xdg-open", path])
 
     def _close(self):
+        if getattr(self, "poll_after", None):
+            self.root.after_cancel(self.poll_after)
+        if self.detail_after:
+            self.root.after_cancel(self.detail_after)
+        if self.still_after:
+            self.root.after_cancel(self.still_after)
         self.cancel.set()
         self._stop_playback()
         with self.process_lock:
